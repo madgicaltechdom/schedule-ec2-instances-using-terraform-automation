@@ -7,9 +7,8 @@ resource "aws_lambda_function" "ec2_scheduler" {
   source_code_hash = filebase64sha256("lambda.zip")
   environment {
     variables = {
-      AUTOSTART_DOC = "AWS-StartEC2Instance"
-      AUTOSTOP_DOC  = "AWS-StopEC2Instance"
       ENV_TAG       = "qa"   # matches your EC2 tag
     }
   }
 }
+

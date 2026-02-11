@@ -1,18 +1,32 @@
 import boto3
 import os
+import datetime
 
-ssm = boto3.client("ssm")
 ec2 = boto3.client("ec2")
 
 def lambda_handler(event, context):
+    print("======================================")
+    IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+    print("Execution time (IST):", datetime.datetime.now(IST))
+    print("Request ID:", context.aws_request_id)
+    print("Event received:", event)
+    print("======================================")
+
     action = event.get("action")
     env_tag = os.environ.get("ENV_TAG", "qa")
 
-    # Get all instances with tag environment=qa that are running or stopped
+    if action == "stop":
+        state_filter = ["running"]
+    elif action == "start":
+        state_filter = ["stopped"]
+    else:
+        raise ValueError("Unknown action: " + str(action))
+
+    # 🔍 Get instances based on tag + state
     response = ec2.describe_instances(
         Filters=[
             {"Name": "tag:environment", "Values": [env_tag]},
-            {"Name": "instance-state-name", "Values": ["running", "stopped"]}
+            {"Name": "instance-state-name", "Values": state_filter}
         ]
     )
 
@@ -23,19 +37,20 @@ def lambda_handler(event, context):
     ]
 
     if not instance_ids:
-        print("No instances found for environment:", env_tag)
+        print(f"No instances found for action: {action} in environment: {env_tag}")
         return
 
-    if action == "stop":
-        doc_name = os.environ.get("AUTOSTOP_DOC", "AWS-StopEC2Instance")
-    elif action == "start":
-        doc_name = os.environ.get("AUTOSTART_DOC", "AWS-StartEC2Instance")
-    else:
-        raise ValueError("Unknown action: " + str(action))
+    try:
+        if action == "stop":
+            ec2.stop_instances(InstanceIds=instance_ids)
+            print("Stopping instances:", instance_ids)
 
-    # Execute SSM automation
-    response = ssm.start_automation_execution(
-        DocumentName=doc_name,
-        Parameters={"InstanceId": instance_ids}
-    )
-    print("SSM Automation started:", response["AutomationExecutionId"])
+        elif action == "start":
+            ec2.start_instances(InstanceIds=instance_ids)
+            print("Starting instances:", instance_ids)
+
+    except Exception as e:
+        print("Error occurred:", str(e))
+        raise
+
+    print("Execution completed successfully.")
