@@ -1,9 +1,9 @@
 # Automated EC2 Start/Stop Scheduler using Terraform (Tag-Based)
 Many businesses struggle with unnecessary AWS costs due to idle EC2 instances running outside business hours.
 
-This solution uses Terraform + EventBridge + Lambda + AWS Systems Manager (SSM) to automatically start and stop EC2 instances based on schedule — completely tag-driven and fully automated.
+This solution uses Terraform + EventBridge + Lambda to automatically start and stop EC2 instances based on schedule — completely tag-driven and fully automated.
 
-Non-production machines can be turned off after hours and on weekends, and automatically started when working hours begin. This can reduce EC2 costs by more than 50% in most non-prod environments.
+Non-production machines can be turned off after hours and on weekends, and automatically started when working hours begin. This can significantly reduce EC2 costs in non-production environments by stopping idle resources outside business hours.
 
 ## Architecture
 
@@ -17,9 +17,7 @@ The automation works as follows:
         - ec2:StartInstances
         - ec2:StopInstances
 
-4. SSM executes the start/stop operation.
-
-Automatically works for newly created tagged instances.
+Automatically works for newly created tagged instances. This solution does not require manual instance listing — it dynamically detects instances using tags.
 
 ## Requirements
 
@@ -37,14 +35,9 @@ Automatically works for newly created tagged instances.
     ```
 ## Tag-Based Scheduling (Important)
 
-This solution dynamically fetches instances using:
-
-```
-Filters=[
-    {"Name": "tag:environment", "Values": [env_tag]},
-    {"Name": "instance-state-name", "Values": ["running", "stopped"]}
-]
-```
+The Lambda dynamically filters instances based on action:
+- stop → running instances
+- start → stopped instances
 
 So any new instance created with environment = qa tag will automatically be scheduled — no Terraform changes required.
  
@@ -88,7 +81,7 @@ So any new instance created with environment = qa tag will automatically be sche
     }
    ```
 
-5. To match your requirements, modify the stopping time value in the file variable.tf. In this case, "30 14" is UTC time, which corresponds to 8 p.m. IST. For timing reference, please see the time conversion chart at the end of this document. Additionally, the machine is shut off at 8 p.m every Monday to Saturday. You can customize the days as per your business requirements.
+5. Modify the cron_stop variable in variables.tf to match your required schedule. In this case, "30 14" is UTC time, which corresponds to 8 p.m. IST. For timing reference, please see the time conversion chart at the end of this document. Additionally, the machine is shut off at 8 p.m every Monday to Saturday. You can customize the days as per your business requirements.
    ```
     variable "cron_stop" {
         description = "Cron expression to define when to trigger a stop of the DB"
@@ -131,27 +124,21 @@ The Lambda:
 - Reads action from EventBridge
 - Detects environment via ENV_TAG
 - Fetches matching EC2 instances
-- Executes SSM automation document
 
 Environment variables:
 ```
-AUTOSTART_DOC = AWS-StartEC2Instance
-AUTOSTOP_DOC  = AWS-StopEC2Instance
 ENV_TAG       = qa
 ```
 
 ## IAM Permissions Used
 Lambda Role Permissions:
 
-- ssm:StartAutomationExecution
 - ec2:DescribeInstances
 - ec2:StartInstances
 - ec2:StopInstances
-- ec2:DescribeInstanceStatus
 - CloudWatch Logs permissions
 
 # Verification
-
 
 ## Check EventBridge Rule
 
@@ -172,15 +159,11 @@ Go to:
 
 CloudWatch → Log groups → /aws/lambda/EC2-Scheduler-qa
 
-You should see: 
+You should see logs similar to:
 
-SSM Automation started: "ExecutionId"
-
-## Check Automation Execution
-
-Go to:
-
-Systems Manager → Automation → Executions
+Stopping instances: ['i-xxxxxxxx']
+Starting instances: ['i-xxxxxxxx']
+Execution completed successfully.
 
 ## References:
 
