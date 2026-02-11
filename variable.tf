@@ -20,16 +20,6 @@ variable "enable" {
   default = true
 }
 
-variable "access_key" {
-  description = "value of access key"
-  default     = ""
-}
-
-variable "secret_key" {
-  description = "value of secret key"
-  default     = ""
-}
-
 locals {
   environment      = lookup(var.workspace_to_environment_map, terraform.workspace, "qa")
   identifier       = local.environment

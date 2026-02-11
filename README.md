@@ -1,4 +1,4 @@
-# Stop Wasting Money on Idle EC2 Instances with Terraform Automation
+# Automated EC2 Start/Stop Scheduler using Terraform (Tag-Based)
 Many businesses struggle with unnecessary AWS costs due to idle EC2 instances running outside business hours.
 
 This solution uses Terraform + EventBridge + Lambda + AWS Systems Manager (SSM) to automatically start and stop EC2 instances based on schedule — completely tag-driven and fully automated.
@@ -12,16 +12,14 @@ The automation works as follows:
 1. EventBridge (CloudWatch Scheduler) triggers on a cron schedule.
 2. EventBridge invokes a Lambda function.
 3. Lambda:
-
     - Finds EC2 instances using the environment tag (e.g., qa)
-    - Calls SSM Automation document:
-
-        - AWS-StartEC2Instance
-        - AWS-StopEC2Instance
+    - Directly calls:
+        - ec2:StartInstances
+        - ec2:StopInstances
 
 4. SSM executes the start/stop operation.
 
-Automatically works for newly created tagged instances
+Automatically works for newly created tagged instances.
 
 ## Requirements
 
@@ -33,7 +31,10 @@ Automatically works for newly created tagged instances
     Key   = environment
     Value = qa (or prd)
     ```
-
+ - Configure AWS credentials using:
+    ```
+    aws configure
+    ```
 ## Tag-Based Scheduling (Important)
 
 This solution dynamically fetches instances using:
@@ -47,11 +48,11 @@ Filters=[
 
 So any new instance created with environment = qa tag will automatically be scheduled — no Terraform changes required.
  
-## Cronjob Fundamentals:
+## Cron Expression Fundamentals
 
  This cron job is made up of several fields, each separated by a space:
  ``` 
- [Minute] [Hour] [Day_of_Month] [Month_of_Year] [Day_of_Week] 
+ [Minute] [Hour] [Day_of_Month] [Month] [Day_of_Week] [Year] 
  ```
 
  - The first field is for minutes (0-59).
@@ -59,24 +60,23 @@ So any new instance created with environment = qa tag will automatically be sche
  - The third field is for days of the month (1-31).
  - The fourth field is for months (1-12).
  - The fifth field is for days of the week (0-7, where both 0 and 7 represent Sunday).
- - The sixth field is for year by default it take current year.
+ - The sixth field represents the year. Use * to run every year.
  
 ## Usage
 
 1. Clone this repository to your local machine by running the below command:
    ```
    git clone -b feature/ec2-scheduler-automation https://github.com/madgicaltechdom/schedule-ec2-instances-using-terraform-automation.git
+   ```
     
 2. Navigate to the repository directory by running the below command:
    ```
    cd schedule-ec2-instances-using-terraform-automation
    ```
     
-3. Login to your AWS Account, search for the EC2, click on the "Tags", then the "Manage tags" button. Here you need to select the instances in which you need to make scheduling and add a tag, in the Key field select "environment", and in Value select "qa" or "prd" according to your need then click on the "Add Tag" button.
+3. Log in to your AWS account and navigate to EC2. Select the instance(s) you want to schedule, go to the Tags tab, and click Manage tags. Add a new tag with Key = environment and Value = qa or prd as per your requirement, then click Save.
 
-![image](https://user-images.githubusercontent.com/101810595/218736709-b072c59d-a8dd-4410-aed5-8ed546067720.png)
-
-4. Optional, if you want to add another tag then first you need to add that tag in the workspace_to_environment_map variable in the varible.tf file and use that tag for scheduling.
+4. Optional: If you want to add another environment, update the workspace_to_environment_map variable in variables.tf.
 
    ```
     variable "workspace_to_environment_map" {
@@ -88,7 +88,7 @@ So any new instance created with environment = qa tag will automatically be sche
     }
    ```
 
-5. To match your requirements, modify the stopping time value in the file variable.tf. In this case, "30 14" is UTC time, which corresponds to 8 p.m. IST. For timing, please refer to the chart we printed on the last of this file. Additionally, the machine is shut off at 8 p.m every Monday to Saturday. You can customise your days according to your need.
+5. To match your requirements, modify the stopping time value in the file variable.tf. In this case, "30 14" is UTC time, which corresponds to 8 p.m. IST. For timing reference, please see the time conversion chart at the end of this document. Additionally, the machine is shut off at 8 p.m every Monday to Saturday. You can customize the days as per your business requirements.
    ```
     variable "cron_stop" {
         description = "Cron expression to define when to trigger a stop of the DB"
@@ -96,46 +96,30 @@ So any new instance created with environment = qa tag will automatically be sche
     }
    ```
    
-6. Change the starting time value in the file variable.tf to suit your needs. For timing, please refer to the chart in the last of this file. In this case, "30 03" denotes UTC time, which corresponds to 9 a.m. IST. Additionally, the machine is turned on at 9 a.m every Monday to Saturday. You can customise your days according to your need.
+6. Change the starting time value in the file variable.tf to suit your needs. For timing reference, please see the time conversion chart at the end of this document. In this case, "30 03" denotes UTC time, which corresponds to 9 a.m. IST. Additionally, the machine is turned on at 9 a.m every Monday to Saturday. You can customize the days as per your business requirements.
    ```
     variable "cron_start" {
         description = "Cron expression to define when to trigger a start of the DB"
         default     = "30 03 ? * MON-SAT *"
     }
    ```
-    
-7. Change the AWS access key value in the file variable.tf to meet your requirements.
-   ```
-    variable "access_key" {
-        description = "value of access key"
-        default     = ""
-    }
-   ```
-
-8. Change the AWS secret key value in the file variable.tf to meet your requirements.
-   ``` 
-    variable "secret_key" {
-        description = "value of secret key"
-        default     = ""
-    }
-   ```
    
-9. Create a new workspace for each environment you want to deploy, for example for qa(testing): 
+7. Create a new workspace for each environment you want to deploy, for example for qa(testing): 
     ```
     terraform workspace new qa 
     ```
  
-10. Initialize Terraform by running below command: 
+8. Initialize Terraform by running below command: 
     ```
     terraform init
     ```
    
-11. Run below command to preview the changes:
+9. Run below command to preview the changes:
     ```
     terraform plan
     ```
    
-12. Run below command to apply the changes:
+10. Run below command to apply the changes:
     ```
     terraform apply
     ```
