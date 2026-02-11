@@ -1,14 +1,51 @@
 # Stop Wasting Money on Idle EC2 Instances with Terraform Automation
-Many businesses are focused about lowering the costs of running AWS EC2 instances. Terraform can help you save money by automating EC2 instance management.This solution enables you to automate the start and stop off your instances based on your business requirements. 
+Many businesses struggle with unnecessary AWS costs due to idle EC2 instances running outside business hours.
 
-Non-production machines can be turned off after hours and on weekends. The machines can be started whenever working hours begin. This might result in more than 50% of your ec2 instances being stopped, saving you a lot.
+This solution uses Terraform + EventBridge + Lambda + AWS Systems Manager (SSM) to automatically start and stop EC2 instances based on schedule — completely tag-driven and fully automated.
+
+Non-production machines can be turned off after hours and on weekends, and automatically started when working hours begin. This can reduce EC2 costs by more than 50% in most non-prod environments.
+
+## Architecture
+
+The automation works as follows:
+
+1. EventBridge (CloudWatch Scheduler) triggers on a cron schedule.
+2. EventBridge invokes a Lambda function.
+3. Lambda:
+
+    - Finds EC2 instances using the environment tag (e.g., qa)
+    - Calls SSM Automation document:
+
+        - AWS-StartEC2Instance
+        - AWS-StopEC2Instance
+
+4. SSM executes the start/stop operation.
+
+Automatically works for newly created tagged instances
 
 ## Requirements
 
  - Install terraform [video](https://www.youtube.com/watch?v=Cn6xYf0QJME&t=8s).
  - Setup your AWS account [video](https://www.youtube.com/watch?v=XhW17g73fvY&t=357s).
  - Create a programmatic user with the permissions specified in the [permission.json](https://github.com/kaumudi766/Multi_Machine_Schedule/blob/main/permission.json) file.
- - To schedule ec2 instances, we must have tagged them with the 'environment' tag.
+ - EC2 instances must be tagged with:
+    ```
+    Key   = environment
+    Value = qa (or prd)
+    ```
+
+## Tag-Based Scheduling (Important)
+
+This solution dynamically fetches instances using:
+
+```
+Filters=[
+    {"Name": "tag:environment", "Values": [env_tag]},
+    {"Name": "instance-state-name", "Values": ["running", "stopped"]}
+]
+```
+
+So any new instance created with environment = qa tag will automatically be scheduled — no Terraform changes required.
  
 ## Cronjob Fundamentals:
 
@@ -28,12 +65,11 @@ Non-production machines can be turned off after hours and on weekends. The machi
 
 1. Clone this repository to your local machine by running the below command:
    ```
-   git clone https://github.com/madgicaltechdom/Schedule-Idle-EC2-Instances-with-Terraform-Automation.git
-   ```
+   git clone -b feature/ec2-scheduler-automation https://github.com/madgicaltechdom/schedule-ec2-instances-using-terraform-automation.git
     
 2. Navigate to the repository directory by running the below command:
    ```
-   cd Schedule-Idle-EC2-Instances-with-Terraform-Automation
+   cd schedule-ec2-instances-using-terraform-automation
    ```
     
 3. Login to your AWS Account, search for the EC2, click on the "Tags", then the "Manage tags" button. Here you need to select the instances in which you need to make scheduling and add a tag, in the Key field select "environment", and in Value select "qa" or "prd" according to your need then click on the "Add Tag" button.
@@ -104,31 +140,63 @@ Non-production machines can be turned off after hours and on weekends. The machi
     terraform apply
     ```
 
-# Verify Machines Status
+## Lambda Implementation (Dynamic Tag-Based)
 
-1. Click on the link below to see status, also you can see the time slot by implementing 5 minute later and run the code to see it's running or stopped status as shown below: 
+The Lambda:
 
-    https://us-east-2.console.aws.amazon.com/cloudwatch/home?region=us-east-2#rules:
+- Reads action from EventBridge
+- Detects environment via ENV_TAG
+- Fetches matching EC2 instances
+- Executes SSM automation document
 
-![Screenshot (164) (1)](https://user-images.githubusercontent.com/109335469/213730422-0e4803f2-4fc8-45ba-bfe0-0cad41313a79.png) 
+Environment variables:
+```
+AUTOSTART_DOC = AWS-StartEC2Instance
+AUTOSTOP_DOC  = AWS-StopEC2Instance
+ENV_TAG       = qa
+```
+
+## IAM Permissions Used
+Lambda Role Permissions:
+
+- ssm:StartAutomationExecution
+- ec2:DescribeInstances
+- ec2:StartInstances
+- ec2:StopInstances
+- ec2:DescribeInstanceStatus
+- CloudWatch Logs permissions
+
+# Verification
 
 
-  
+## Check EventBridge Rule
 
-<img width="812" alt="Screenshot (1631)" src="https://user-images.githubusercontent.com/109335469/214514799-3f224341-661c-4227-9c5b-0fe2887584c6.png">
+Go to: 
 
-![Screenshot (165) (1)](https://user-images.githubusercontent.com/109335469/214514514-c45e39d1-ade5-4adf-929a-e001af5a88da.jpg)
+EventBridge → Scheduled rules
 
+https://us-west-1.console.aws.amazon.com/events/home?region=us-west-1#/scheduled-rules
 
+Confirm:
 
+- Rule is Enabled
+- Next trigger time is correct (UTC)
 
+## Check Lambda Logs
 
-2. Check The Execution Point Using System Manager by clicking on the link below: 
+Go to: 
 
-https://us-east-2.console.aws.amazon.com/systems-manager/automation/executions?region=us-east-2
+CloudWatch → Log groups → /aws/lambda/EC2-Scheduler-qa
 
-<img width="906" alt="Screenshot (166)" src="https://user-images.githubusercontent.com/109335469/213734723-5a2d5503-472f-48d2-b827-c9225e2ba14f.png">
+You should see: 
 
+SSM Automation started: "ExecutionId"
+
+## Check Automation Execution
+
+Go to:
+
+Systems Manager → Automation → Executions
 
 ## References:
 
