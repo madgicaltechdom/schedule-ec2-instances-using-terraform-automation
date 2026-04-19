@@ -1,3 +1,11 @@
+**Hook:** EC2 start/stop is manual — unnecessary costs at night.
+
+**Body:** Terraform automation for EC2 scheduling.
+
+**Closer:** Automated EC2 scheduling — 70% cost reduction.
+
+---
+
 # Stop Wasting Money on Idle EC2 Instances with Terraform Automation
 Many businesses are focused about lowering the costs of running AWS EC2 instances. Terraform can help you save money by automating EC2 instance management.This solution enables you to automate the start and stop off your instances based on your business requirements. 
 
