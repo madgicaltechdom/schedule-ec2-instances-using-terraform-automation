@@ -1,8 +1,14 @@
 import boto3
-import os
+import time
 import datetime
 
 ec2 = boto3.client("ec2")
+
+MAX_RETRIES = 3
+BASE_DELAY = 10
+FLEET_STATES_TO_MODIFY = ["active", "partially_fulfilled", "unfulfilled"]
+SKIP_RETRY_ERRORS = {"FleetNotInModifiableState"}
+
 
 def lambda_handler(event, context):
     print("======================================")
@@ -13,39 +19,102 @@ def lambda_handler(event, context):
     print("======================================")
 
     action = event.get("action")
-    fleet_ids = os.environ.get("FLEET_IDS", "").split(",")
 
-    if not fleet_ids or fleet_ids == [""]:
-        print("No fleet IDs configured in FLEET_IDS environment variable")
-        return
+    if action not in ("stop", "start"):
+        print(f"ERROR: Unknown action '{action}', expected 'start' or 'stop'")
+        return {"error": f"Unknown action '{action}'", "status": "failed"}
 
-    if action == "stop":
-        target_capacity = 0
-    elif action == "start":
-        target_capacity = 1
-    else:
-        raise ValueError("Unknown action: " + str(action))
+    target_capacity = 1 if action == "start" else 0
+
+    try:
+        fleet_ids = get_active_fleet_ids()
+    except Exception as e:
+        print(f"ERROR: Failed to discover fleets: {e}")
+        return {"error": str(e), "status": "failed"}
+
+    if not fleet_ids:
+        print("No active fleets found")
+        return []
+
+    print(f"Found {len(fleet_ids)} fleet(s): {fleet_ids}")
 
     results = []
     for fleet_id in fleet_ids:
-        fleet_id = fleet_id.strip()
-        if not fleet_id:
+        try:
+            current_capacity = get_fleet_capacity(fleet_id)
+        except Exception as e:
+            print(f"ERROR: Failed to get capacity for fleet {fleet_id}: {e}")
+            results.append({"fleet_id": fleet_id, "status": "error", "error": str(e)})
             continue
 
-        print(f"Processing fleet: {fleet_id}")
+        print(f"Fleet {fleet_id} current capacity: {current_capacity}")
+
+        if current_capacity == target_capacity:
+            status = "already_stopped" if target_capacity == 0 else "already_running"
+            print(f"Fleet {fleet_id} is {status}, skipping")
+            results.append({"fleet_id": fleet_id, "status": status, "current_capacity": current_capacity})
+            continue
+
+        print(f"Modifying fleet {fleet_id} from {current_capacity} to {target_capacity}")
+        result = modify_fleet_with_retry(fleet_id, target_capacity, context)
+        results.append(result)
+
+    succeeded = sum(1 for r in results if r["status"] == "success")
+    skipped = sum(1 for r in results if r["status"] in ("skipped", "already_stopped", "already_running"))
+    failed = sum(1 for r in results if r["status"] in ("error", "timeout"))
+    print(f"Summary: {succeeded} succeeded, {skipped} skipped, {failed} failed")
+    print(f"Results: {results}")
+    return results
+
+
+def get_active_fleet_ids():
+    fleet_ids = []
+    paginator = ec2.get_paginator("describe_fleets")
+    for page in paginator.paginate(
+        Filters=[{"Name": "fleet-state", "Values": FLEET_STATES_TO_MODIFY}]
+    ):
+        for fleet in page.get("Fleets", []):
+            fleet_ids.append(fleet["FleetId"])
+    return fleet_ids
+
+
+def get_fleet_capacity(fleet_id):
+    response = ec2.describe_fleets(FleetIds=[fleet_id])
+    fleets = response.get("Fleets", [])
+    if not fleets:
+        raise ValueError(f"Fleet {fleet_id} not found")
+    return fleets[0]["TargetCapacitySpecification"]["TotalTargetCapacity"]
+
+
+def modify_fleet_with_retry(fleet_id, target_capacity, context):
+    for attempt in range(1, MAX_RETRIES + 1):
+        remaining_ms = context.get_remaining_time_in_millis()
+        if remaining_ms < (BASE_DELAY + 10) * 1000:
+            print(f"Lambda timeout approaching ({remaining_ms}ms left), stopping retries")
+            return {"fleet_id": fleet_id, "status": "timeout", "attempt": attempt}
+
         try:
             ec2.modify_fleet(
                 FleetId=fleet_id,
                 TargetCapacitySpecification={
-                    "TotalTargetCapacity": target_capacity,
-                    "DefaultTargetCapacityType": "spot"
+                    "TotalTargetCapacity": target_capacity
                 }
             )
             print(f"Set fleet {fleet_id} target capacity to {target_capacity}")
-            results.append({"fleet_id": fleet_id, "status": "success"})
+            return {"fleet_id": fleet_id, "status": "success", "attempt": attempt}
         except Exception as e:
-            print(f"Error modifying fleet {fleet_id}: {str(e)}")
-            results.append({"fleet_id": fleet_id, "status": "error", "error": str(e)})
+            error_code = getattr(e, "response", {}).get("Error", {}).get("Code", "")
+            print(f"Error (attempt {attempt}/{MAX_RETRIES}): {error_code} - {str(e)}")
 
-    print(f"Execution completed. Results: {results}")
-    return results
+            if error_code in SKIP_RETRY_ERRORS:
+                print(f"Skipping retries for {error_code}")
+                return {"fleet_id": fleet_id, "status": "skipped", "error": str(e), "attempt": attempt}
+
+            if attempt == MAX_RETRIES:
+                return {"fleet_id": fleet_id, "status": "error", "error": str(e), "attempt": attempt}
+
+            delay = BASE_DELAY * (2 ** (attempt - 1))
+            print(f"Retrying in {delay}s...")
+            time.sleep(delay)
+
+    return {"fleet_id": fleet_id, "status": "error", "error": "Exhausted all retries"}

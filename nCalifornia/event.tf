@@ -12,12 +12,35 @@ resource "aws_cloudwatch_event_target" "start_target" {
   rule      = aws_cloudwatch_event_rule.start_rule.name
   arn       = aws_lambda_function.ec2_scheduler.arn
   input     = jsonencode({ action = "start" })
+
+  retry_policy {
+    maximum_event_age_in_seconds = 3600
+    maximum_retry_attempts       = 2
+  }
+
+  dead_letter_config {
+    arn = aws_sqs_queue.scheduler_dlq.arn
+  }
 }
 
 resource "aws_cloudwatch_event_target" "stop_target" {
   rule      = aws_cloudwatch_event_rule.stop_rule.name
   arn       = aws_lambda_function.ec2_scheduler.arn
   input     = jsonencode({ action = "stop" })
+
+  retry_policy {
+    maximum_event_age_in_seconds = 3600
+    maximum_retry_attempts       = 2
+  }
+
+  dead_letter_config {
+    arn = aws_sqs_queue.scheduler_dlq.arn
+  }
+}
+
+resource "aws_sqs_queue" "scheduler_dlq" {
+  name                       = "EC2-Scheduler-DLQ-${local.identifier}"
+  message_retention_seconds = 1209600
 }
 
 resource "aws_lambda_permission" "allow_eventbridge_start" {

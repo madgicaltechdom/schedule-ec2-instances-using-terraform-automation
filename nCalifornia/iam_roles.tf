@@ -43,6 +43,15 @@ resource "aws_iam_role_policy" "lambda_ssm_policy" {
           "logs:PutLogEvents"
         ],
         Resource = "arn:aws:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:log-group:/aws/lambda/EC2-Scheduler-${local.identifier}:*"
+      },
+
+      # Allow sending failed events to DLQ
+      {
+        Effect = "Allow",
+        Action = [
+          "sqs:SendMessage"
+        ],
+        Resource = aws_sqs_queue.scheduler_dlq.arn
       }
 
     ]

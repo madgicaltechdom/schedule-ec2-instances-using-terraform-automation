@@ -13,9 +13,10 @@ The automation works as follows:
 1. EventBridge (CloudWatch Scheduler) triggers on a cron schedule.
 2. EventBridge invokes a Lambda function.
 3. Lambda:
-    - Reads fleet IDs from environment variable `FLEET_IDS`
+    - Auto-discovers all active EC2 Fleets via `DescribeFleets` API (no hardcoded IDs)
+    - Checks current capacity of each fleet before modifying
     - Calls `ec2:ModifyFleet` to set target capacity:
-        - `target_capacity = 0` → terminates fleet instances (8 PM IST)
+        - `target_capacity = 0` → terminates fleet instances (10 PM IST)
         - `target_capacity = 1` → creates new fleet instances (9 AM IST)
 
 ## How It Works
@@ -23,7 +24,7 @@ The automation works as follows:
 | Time (IST) | Time (UTC) | Action | What Happens |
 |------------|------------|--------|--------------|
 | 9 AM | 03:30 | Start | Fleet creates new Spot instances |
-| 8 PM | 14:30 | Stop | Fleet terminates Spot instances |
+| 10 PM | 16:30 | Stop | Fleet terminates Spot instances |
 | Sunday | - | - | Stays stopped (no start) |
 
 **Note:** Fleet instances are terminated and recreated each day. This means:
@@ -31,6 +32,17 @@ The automation works as follows:
 - Data on instance store volumes is lost
 - EBS volumes (if attached) persist
 - For persistent data, use EBS or EFS
+
+### Idempotent Behavior
+
+The Lambda checks current capacity before modifying:
+
+| Scenario | Behavior |
+|----------|----------|
+| Fleet already at target capacity | Skips with log `already_running` or `already_stopped` |
+| Fleet not at target capacity | Modifies fleet to desired capacity |
+| Fleet in non-modifiable state | Skips immediately (e.g., `FleetNotInModifiableState`) |
+| Fleet discovery fails | Returns error, continues with remaining fleets |
 
 ## Requirements
 
@@ -41,16 +53,6 @@ The automation works as follows:
   ```
   aws configure
   ```
-
-## Find Your Fleet IDs
-
-Run this command to list all EC2 Fleets in your region:
-
-```bash
-aws ec2 describe-fleets --region us-west-1 --query "Fleets[*].{FleetId:FleetId,Name:Tags[?Key=='Name']|[0].Value}" --output table
-```
-
-Fleet IDs look like: `fleet-0123456789abcdef0`
 
 ## Usage
 
@@ -64,18 +66,10 @@ Fleet IDs look like: `fleet-0123456789abcdef0`
    cd schedule-ec2-instances-using-terraform-automation/nCalifornia
    ```
 
-3. Create `terraform.tfvars` and add your fleet IDs:
-   ```
-   fleet_ids = [
-     "fleet-xxxxxxxxxxxxx",
-     "fleet-yyyyyyyyyyyyy"
-   ]
-   ```
-
-4. (Optional) Customize cron schedules in `variable.tf`:
+3. (Optional) Customize cron schedules in `variable.tf`:
    ```
    variable "cron_stop" {
-     default = "30 14 ? * MON-SAT *"  # 8 PM IST, Mon-SAT
+     default = "30 16 ? * MON-SAT *"  # 10 PM IST, Mon-SAT
    }
 
    variable "cron_start" {
@@ -83,22 +77,22 @@ Fleet IDs look like: `fleet-0123456789abcdef0`
    }
    ```
 
-5. Create a new workspace (optional):
+4. Create a new workspace (optional):
    ```
    terraform workspace new qa
    ```
 
-6. Initialize Terraform:
+5. Initialize Terraform:
    ```
    terraform init
    ```
 
-7. Preview changes:
+6. Preview changes:
    ```
    terraform plan
    ```
 
-8. Apply changes:
+7. Apply changes:
    ```
    terraform apply
    ```
@@ -107,13 +101,36 @@ Fleet IDs look like: `fleet-0123456789abcdef0`
 
 The Lambda:
 
-- Reads fleet IDs from `FLEET_IDS` environment variable (comma-separated)
+- **Auto-discovers fleets** via `DescribeFleets` API — no hardcoded fleet IDs
+- **Checks current capacity** before modifying (idempotent)
 - Receives action (`start` or `stop`) from EventBridge
 - Calls `ec2:ModifyFleet` to set target capacity to 0 or 1
+- Retries up to 3 times with exponential backoff (10s, 20s, 40s)
+- Skips retries for `FleetNotInModifiableState` errors
 
-Environment variables:
+### Error Handling
+
+| Error | Handling |
+|-------|----------|
+| Unknown action | Returns error, Lambda succeeds |
+| `DescribeFleets` fails (IAM/network) | Returns error, Lambda succeeds |
+| Fleet deleted during execution | Logs error, continues with next fleet |
+| `FleetNotInModifiableState` | Skips immediately, no retries |
+| Lambda timeout approaching | Stops retries, returns timeout status |
+| All retries exhausted | Returns error status |
+
+### Log Output Example
+
 ```
-FLEET_IDS = fleet-xxxxxxxxxxxxx,fleet-yyyyyyyyyyyyy
+Execution time (IST): 2026-07-21 22:13:28+05:30
+Event received: {'action': 'stop'}
+Found 2 fleet(s): [fleet-aaa, fleet-bbb]
+Fleet fleet-aaa current capacity: 1
+Modifying fleet fleet-aaa from 1 to 0
+Set fleet fleet-aaa target capacity to 0
+Fleet fleet-bbb current capacity: 1
+Fleet fleet-bbb is already_stopped, skipping
+Summary: 1 succeeded, 1 skipped, 0 failed
 ```
 
 ## IAM Permissions
@@ -122,7 +139,7 @@ Lambda Role Permissions:
 
 - `ec2:ModifyFleet`
 - `ec2:DescribeFleets`
-- `ec2:DescribeFleetsInstances`
+- `ec2:DescribeFleetInstances`
 - CloudWatch Logs permissions
 
 ## Verification
@@ -143,9 +160,11 @@ Go to: CloudWatch → Log groups → /aws/lambda/EC2-Scheduler-qa
 
 You should see logs similar to:
 ```
-Processing fleet: fleet-xxxxxxxxxxxxx
+Found 1 fleet(s): [fleet-xxxxxxxxxxxxx]
+Fleet fleet-xxxxxxxxxxxxx current capacity: 1
+Modifying fleet fleet-xxxxxxxxxxxxx from 1 to 0
 Set fleet fleet-xxxxxxxxxxxxx target capacity to 0
-Execution completed. Results: [{'fleet_id': 'fleet-xxxxxxxxxxxxx', 'status': 'success'}]
+Summary: 1 succeeded, 0 skipped, 0 failed
 ```
 
 ## Time Zone Reference
@@ -153,7 +172,7 @@ Execution completed. Results: [{'fleet_id': 'fleet-xxxxxxxxxxxxx', 'status': 'su
 | IST | UTC |
 |-----|-----|
 | 9 AM | 03:30 |
-| 8 PM | 14:30 |
+| 10 PM | 16:30 |
 
 [Time Zone Converter (IST to UTC)](https://www.worldtimebuddy.com/ist-to-utc-converter)
 
