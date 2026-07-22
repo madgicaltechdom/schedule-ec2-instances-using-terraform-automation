@@ -1,155 +1,185 @@
-**Hook:** EC2 start/stop is manual — unnecessary costs at night.
+# Automated EC2 Fleet Scheduler using Terraform
 
-**Body:** Terraform automation for EC2 scheduling.
+Many businesses struggle with unnecessary AWS costs due to idle EC2 instances running outside business hours.
 
-**Closer:** Automated EC2 scheduling — 70% cost reduction.
+This solution uses Terraform + EventBridge + Lambda to automatically start and stop **EC2 Fleet instances** based on schedule — fully automated.
 
----
+Non-production machines can be turned off after hours and on weekends, and automatically started when working hours begin. This can significantly reduce EC2 costs in non-production environments by stopping idle resources outside business hours.
 
-# Stop Wasting Money on Idle EC2 Instances with Terraform Automation
-Many businesses are focused about lowering the costs of running AWS EC2 instances. Terraform can help you save money by automating EC2 instance management.This solution enables you to automate the start and stop off your instances based on your business requirements. 
+## Architecture
 
-Non-production machines can be turned off after hours and on weekends. The machines can be started whenever working hours begin. This might result in more than 50% of your ec2 instances being stopped, saving you a lot.
+The automation works as follows:
+
+1. EventBridge (CloudWatch Scheduler) triggers on a cron schedule.
+2. EventBridge invokes a Lambda function.
+3. Lambda:
+    - Auto-discovers all active EC2 Fleets via `DescribeFleets` API (no hardcoded IDs)
+    - Checks current capacity of each fleet before modifying
+    - Calls `ec2:ModifyFleet` to set target capacity:
+        - `target_capacity = 0` → terminates fleet instances (10 PM IST)
+        - `target_capacity = 1` → creates new fleet instances (9 AM IST)
+
+## How It Works
+
+| Time (IST) | Time (UTC) | Action | What Happens |
+|------------|------------|--------|--------------|
+| 9 AM | 03:30 | Start | Fleet creates new Spot instances |
+| 10 PM | 16:30 | Stop | Fleet terminates Spot instances |
+| Sunday | - | - | Stays stopped (no start) |
+
+**Note:** Fleet instances are terminated and recreated each day. This means:
+- New public/private IPs each morning
+- Data on instance store volumes is lost
+- EBS volumes (if attached) persist
+- For persistent data, use EBS or EFS
+
+### Idempotent Behavior
+
+The Lambda checks current capacity before modifying:
+
+| Scenario | Behavior |
+|----------|----------|
+| Fleet already at target capacity | Skips with log `already_running` or `already_stopped` |
+| Fleet not at target capacity | Modifies fleet to desired capacity |
+| Fleet in non-modifiable state | Skips immediately (e.g., `FleetNotInModifiableState`) |
+| Fleet discovery fails | Returns error, continues with remaining fleets |
 
 ## Requirements
 
- - Install terraform [video](https://www.youtube.com/watch?v=Cn6xYf0QJME&t=8s).
- - Setup your AWS account [video](https://www.youtube.com/watch?v=XhW17g73fvY&t=357s).
- - Create a programmatic user with the permissions specified in the [permission.json](https://github.com/kaumudi766/Multi_Machine_Schedule/blob/main/permission.json) file.
- - To schedule ec2 instances, we must have tagged them with the 'environment' tag.
- 
-## Cronjob Fundamentals:
+- Install Terraform
+- Setup your AWS account
+- Create a programmatic user with permissions to manage EC2 Fleets
+- Configure AWS credentials using:
+  ```
+  aws configure
+  ```
 
- This cron job is made up of several fields, each separated by a space:
- ``` 
- [Minute] [Hour] [Day_of_Month] [Month_of_Year] [Day_of_Week] 
- ```
-
- - The first field is for minutes (0-59).
- - The second field is for hours (0-23).
- - The third field is for days of the month (1-31).
- - The fourth field is for months (1-12).
- - The fifth field is for days of the week (0-7, where both 0 and 7 represent Sunday).
- - The sixth field is for year by default it take current year.
- 
 ## Usage
 
-1. Clone this repository to your local machine by running the below command:
+1. Clone this repository:
    ```
-   git clone https://github.com/madgicaltechdom/Schedule-Idle-EC2-Instances-with-Terraform-Automation.git
-   ```
-    
-2. Navigate to the repository directory by running the below command:
-   ```
-   cd Schedule-Idle-EC2-Instances-with-Terraform-Automation
-   ```
-    
-3. Login to your AWS Account, search for the EC2, click on the "Tags", then the "Manage tags" button. Here you need to select the instances in which you need to make scheduling and add a tag, in the Key field select "environment", and in Value select "qa" or "prd" according to your need then click on the "Add Tag" button.
-
-![image](https://user-images.githubusercontent.com/101810595/218736709-b072c59d-a8dd-4410-aed5-8ed546067720.png)
-
-4. Optional, if you want to add another tag then first you need to add that tag in the workspace_to_environment_map variable in the varible.tf file and use that tag for scheduling.
-
-   ```
-    variable "workspace_to_environment_map" {
-      type = map(string)
-      default = {
-        qa  = "qa"
-        prd = "prd"
-      }
-    }
+   git clone -b feature/ec2-scheduler-automation https://github.com/madgicaltechdom/schedule-ec2-instances-using-terraform-automation.git
    ```
 
-5. To match your requirements, modify the stopping time value in the file variable.tf. In this case, "30 14" is UTC time, which corresponds to 8 p.m. IST. For timing, please refer to the chart we printed on the last of this file. Additionally, the machine is shut off at 8 p.m every Monday to Saturday. You can customise your days according to your need.
+2. Navigate to the nCalifornia directory:
    ```
-    variable "cron_stop" {
-        description = "Cron expression to define when to trigger a stop of the DB"
-        default     = "30 14 ? * MON-SAT *"
-    }
-   ```
-   
-6. Change the starting time value in the file variable.tf to suit your needs. For timing, please refer to the chart in the last of this file. In this case, "30 03" denotes UTC time, which corresponds to 9 a.m. IST. Additionally, the machine is turned on at 9 a.m every Monday to Saturday. You can customise your days according to your need.
-   ```
-    variable "cron_start" {
-        description = "Cron expression to define when to trigger a start of the DB"
-        default     = "30 03 ? * MON-SAT *"
-    }
-   ```
-    
-7. Change the AWS access key value in the file variable.tf to meet your requirements.
-   ```
-    variable "access_key" {
-        description = "value of access key"
-        default     = ""
-    }
+   cd schedule-ec2-instances-using-terraform-automation/nCalifornia
    ```
 
-8. Change the AWS secret key value in the file variable.tf to meet your requirements.
-   ``` 
-    variable "secret_key" {
-        description = "value of secret key"
-        default     = ""
-    }
+3. (Optional) Customize cron schedules in `variable.tf`:
    ```
-   
-9. Create a new workspace for each environment you want to deploy, for example for qa(testing): 
-    ```
-    terraform workspace new qa 
-    ```
- 
-10. Initialize Terraform by running below command: 
-    ```
-    terraform init
-    ```
-   
-11. Run below command to preview the changes:
-    ```
-    terraform plan
-    ```
-   
-12. Run below command to apply the changes:
-    ```
-    terraform apply
-    ```
+   variable "cron_stop" {
+     default = "30 16 ? * MON-SAT *"  # 10 PM IST, Mon-SAT
+   }
 
-# Verify Machines Status
+   variable "cron_start" {
+     default = "30 03 ? * MON-SAT *"  # 9 AM IST, Mon-SAT
+   }
+   ```
 
-1. Click on the link below to see status, also you can see the time slot by implementing 5 minute later and run the code to see it's running or stopped status as shown below: 
+4. Create a new workspace (optional):
+   ```
+   terraform workspace new qa
+   ```
 
-    https://us-east-2.console.aws.amazon.com/cloudwatch/home?region=us-east-2#rules:
+5. Initialize Terraform:
+   ```
+   terraform init
+   ```
 
-![Screenshot (164) (1)](https://user-images.githubusercontent.com/109335469/213730422-0e4803f2-4fc8-45ba-bfe0-0cad41313a79.png) 
+6. Preview changes:
+   ```
+   terraform plan
+   ```
 
+7. Apply changes:
+   ```
+   terraform apply
+   ```
 
-  
+## Lambda Implementation
 
-<img width="812" alt="Screenshot (1631)" src="https://user-images.githubusercontent.com/109335469/214514799-3f224341-661c-4227-9c5b-0fe2887584c6.png">
+The Lambda:
 
-![Screenshot (165) (1)](https://user-images.githubusercontent.com/109335469/214514514-c45e39d1-ade5-4adf-929a-e001af5a88da.jpg)
+- **Auto-discovers fleets** via `DescribeFleets` API — no hardcoded fleet IDs
+- **Checks current capacity** before modifying (idempotent)
+- Receives action (`start` or `stop`) from EventBridge
+- Calls `ec2:ModifyFleet` to set target capacity to 0 or 1
+- Retries up to 3 times with exponential backoff (10s, 20s, 40s)
+- Skips retries for `FleetNotInModifiableState` errors
 
+### Error Handling
 
+| Error | Handling |
+|-------|----------|
+| Unknown action | Returns error, Lambda succeeds |
+| `DescribeFleets` fails (IAM/network) | Returns error, Lambda succeeds |
+| Fleet deleted during execution | Logs error, continues with next fleet |
+| `FleetNotInModifiableState` | Skips immediately, no retries |
+| Lambda timeout approaching | Stops retries, returns timeout status |
+| All retries exhausted | Returns error status |
 
+### Log Output Example
 
+```
+Execution time (IST): 2026-07-21 22:13:28+05:30
+Event received: {'action': 'stop'}
+Found 2 fleet(s): [fleet-aaa, fleet-bbb]
+Fleet fleet-aaa current capacity: 1
+Modifying fleet fleet-aaa from 1 to 0
+Set fleet fleet-aaa target capacity to 0
+Fleet fleet-bbb current capacity: 1
+Fleet fleet-bbb is already_stopped, skipping
+Summary: 1 succeeded, 1 skipped, 0 failed
+```
 
-2. Check The Execution Point Using System Manager by clicking on the link below: 
+## IAM Permissions
 
-https://us-east-2.console.aws.amazon.com/systems-manager/automation/executions?region=us-east-2
+Lambda Role Permissions:
 
-<img width="906" alt="Screenshot (166)" src="https://user-images.githubusercontent.com/109335469/213734723-5a2d5503-472f-48d2-b827-c9225e2ba14f.png">
+- `ec2:ModifyFleet`
+- `ec2:DescribeFleets`
+- `ec2:DescribeFleetInstances`
+- CloudWatch Logs permissions
 
+## Verification
 
-## References:
+### Check EventBridge Rule
 
-We took information from this [article](https://dnx.solutions/reducing-aws-costs-by-turning-off-development-environments-at-night-the-easy-way-without-lambda/) and this is the step by step User Guide [video](https://drive.google.com/file/d/1d-oyPzC7z2A5ihaIFQuT2oi0DzHJUs6L/view?usp=sharing).
+Go to: EventBridge → Scheduled rules
 
-- Here is [time Zone converter](https://www.worldtimebuddy.com/ist-to-utc-converter) for IST to UTC:
+https://us-west-1.console.aws.amazon.com/events/home?region=us-west-1#/scheduled-rules
 
-![web-screenshot-25-01-2023 (4)](https://user-images.githubusercontent.com/109335469/214537941-37ab6022-d49a-4e50-8d27-623c77007e05.jpg)
+Confirm:
+- Rule is Enabled
+- Next trigger time is correct (UTC)
 
-# Contributing
+### Check Lambda Logs
+
+Go to: CloudWatch → Log groups → /aws/lambda/EC2-Scheduler-qa
+
+You should see logs similar to:
+```
+Found 1 fleet(s): [fleet-xxxxxxxxxxxxx]
+Fleet fleet-xxxxxxxxxxxxx current capacity: 1
+Modifying fleet fleet-xxxxxxxxxxxxx from 1 to 0
+Set fleet fleet-xxxxxxxxxxxxx target capacity to 0
+Summary: 1 succeeded, 0 skipped, 0 failed
+```
+
+## Time Zone Reference
+
+| IST | UTC |
+|-----|-----|
+| 9 AM | 03:30 |
+| 10 PM | 16:30 |
+
+[Time Zone Converter (IST to UTC)](https://www.worldtimebuddy.com/ist-to-utc-converter)
+
+## Contributing
 
 We are very grateful for any contributions you are willing to make. Please have a look here to get started. If you aim to make a large change, it is helpful to discuss the change first in a new GitHub issue. Feel free to open one!
 
-# LICENCE:
+## License
 
 This project is licensed under the MIT License.

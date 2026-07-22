@@ -7,12 +7,12 @@ variable "workspace_to_environment_map" {
 }
 
 variable "cron_stop" {
-  description = "Cron expression to define when to trigger a stop of the DB"
-  default     = "30 14 ? * MON-SAT *"
+  description = "Cron expression to stop fleet at 10 PM IST (16:30 UTC), Mon-SAT. Sunday stays stopped."
+  default     = "30 16 ? * MON-SAT *"
 }
 
 variable "cron_start" {
-  description = "Cron expression to define when to trigger a start of the DB"
+  description = "Cron expression to start fleet at 9 AM IST (03:30 UTC), Mon-SAT. Sunday stays stopped."
   default     = "30 03 ? * MON-SAT *"
 }
 
@@ -20,17 +20,7 @@ variable "enable" {
   default = true
 }
 
-variable "access_key" {
-  description = "value of access key"
-  default     = ""
-}
-
-variable "secret_key" {
-  description = "value of secret key"
-  default     = ""
-}
-
 locals {
-  environment      = lookup(var.workspace_to_environment_map, terraform.workspace, "qa")
-  identifier       = local.environment
+  environment = lookup(var.workspace_to_environment_map, terraform.workspace, "qa")
+  identifier  = local.environment
 }
