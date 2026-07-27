@@ -14,7 +14,7 @@ The automation works as follows:
 2. EventBridge invokes a Lambda function.
 3. Lambda handles two independent sections (failure in one does not affect the other):
     - **EC2 Fleets**: Auto-discovers all active fleets via `DescribeFleets` API, checks capacity, calls `ec2:ModifyFleet` to set target capacity to 0 or 1
-    - **EC2 Instances**: Discovers instances by `environment` tag, calls `ec2:StartInstances` / `ec2:StopInstances`
+    - **EC2 Instances**: Discovers instances by `environment` tag, **excludes fleet-managed instances** (tagged with `aws:ec2:fleet-id`), then stops/starts remaining instances individually
 
 ## How It Works
 
@@ -100,6 +100,8 @@ The Lambda:
 
 - **Auto-discovers fleets** via `DescribeFleets` API — no hardcoded fleet IDs
 - **Auto-discovers EC2 instances** by `environment` tag — no hardcoded instance IDs
+- **Filters out fleet-managed instances** (`aws:ec2:fleet-id` tag) — these are handled by the fleet capacity logic, not individually
+- **Stops/starts instances individually** — one failure does not block other instances
 - **Checks current capacity** before modifying (idempotent)
 - Receives action (`start` or `stop`) from EventBridge
 - Calls `ec2:ModifyFleet` to set target capacity to 0 or 1
@@ -118,7 +120,8 @@ The Lambda:
 | `FleetNotInModifiableState` | Skips immediately, no retries |
 | Lambda timeout approaching | Stops retries, returns timeout status |
 | All retries exhausted | Returns error status |
-| EC2 instance start/stop fails | Returns error for instance section, fleet still runs |
+| EC2 instance start/stop fails | Logs error for that instance, continues with remaining instances |
+| Fleet-managed instance found | Skipped automatically (handled by fleet capacity logic) |
 
 ### Log Output Example
 
@@ -132,8 +135,9 @@ Set fleet fleet-aaa target capacity to 0
 Fleet fleet-bbb current capacity: 1
 Fleet fleet-bbb is already_stopped, skipping
 Fleet Summary: 1 succeeded, 1 skipped, 0 failed
-Found 3 EC2 instance(s): [i-aaa, i-bbb, i-ccc]
-Stopping EC2 instances: ['i-aaa', 'i-bbb', 'i-ccc']
+Skipping 2 fleet-managed instance(s) (handled by fleet): [i-aaa, i-bbb]
+Found 1 EC2 instance(s) to stop: [i-ccc]
+Stopping EC2 instance: i-ccc
 Final Results: {'fleet': [...], 'instances': [...]}
 ```
 
@@ -172,8 +176,9 @@ Fleet fleet-xxxxxxxxxxxxx current capacity: 1
 Modifying fleet fleet-xxxxxxxxxxxxx from 1 to 0
 Set fleet fleet-xxxxxxxxxxxxx target capacity to 0
 Fleet Summary: 1 succeeded, 0 skipped, 0 failed
-Found 2 EC2 instance(s): [i-xxxxxxxxxxxxx, i-yyyyyyyyyyyyy]
-Stopping EC2 instances: ['i-xxxxxxxxxxxxx', 'i-yyyyyyyyyyyyy']
+Skipping 1 fleet-managed instance(s) (handled by fleet): [i-yyyyyyyyyyyyy]
+Found 1 EC2 instance(s) to stop: [i-xxxxxxxxxxxxx]
+Stopping EC2 instance: i-xxxxxxxxxxxxx
 ```
 
 ## Time Zone Reference

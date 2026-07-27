@@ -105,30 +105,48 @@ def handle_ec2_instances(action, env_tag):
         ]
     )
 
-    instance_ids = [
-        i["InstanceId"]
-        for r in response["Reservations"]
-        for i in r["Instances"]
-    ]
+    all_instance_ids = []
+    fleet_instance_ids = []
+    for r in response["Reservations"]:
+        for i in r["Instances"]:
+            all_instance_ids.append(i["InstanceId"])
+            tags = {t["Key"]: t["Value"] for t in i.get("Tags", [])}
+            if "aws:ec2:fleet-id" in tags:
+                fleet_instance_ids.append(i["InstanceId"])
+
+    if fleet_instance_ids:
+        print(f"Skipping {len(fleet_instance_ids)} fleet-managed instance(s) (handled by fleet): {fleet_instance_ids}")
+
+    instance_ids = [iid for iid in all_instance_ids if iid not in fleet_instance_ids]
 
     if not instance_ids:
-        print(f"No EC2 instances found for action '{action}' in environment '{env_tag}'")
+        print(f"No EC2 instances found for action '{action}' in environment '{env_tag}' (all are fleet-managed or none matched)")
         return []
 
-    print(f"Found {len(instance_ids)} EC2 instance(s): {instance_ids}")
+    print(f"Found {len(instance_ids)} EC2 instance(s) to {action}: {instance_ids}")
 
-    try:
-        if action == "stop":
-            ec2.stop_instances(InstanceIds=instance_ids)
-            print(f"Stopping EC2 instances: {instance_ids}")
-        else:
-            ec2.start_instances(InstanceIds=instance_ids)
-            print(f"Starting EC2 instances: {instance_ids}")
+    succeeded = []
+    failed = []
+    for instance_id in instance_ids:
+        try:
+            if action == "stop":
+                ec2.stop_instances(InstanceIds=[instance_id])
+                print(f"Stopping EC2 instance: {instance_id}")
+            else:
+                ec2.start_instances(InstanceIds=[instance_id])
+                print(f"Starting EC2 instance: {instance_id}")
+            succeeded.append(instance_id)
+        except Exception as e:
+            print(f"ERROR: Failed to {action} EC2 instance {instance_id}: {e}")
+            failed.append({"instance_id": instance_id, "error": str(e)})
 
-        return [{"instance_ids": instance_ids, "status": "success", "action": action}]
-    except Exception as e:
-        print(f"ERROR: Failed to {action} EC2 instances: {e}")
-        return [{"instance_ids": instance_ids, "status": "error", "error": str(e)}]
+    results = []
+    if succeeded:
+        results.append({"instance_ids": succeeded, "status": "success", "action": action})
+    if failed:
+        results.append({"status": "error", "failed": failed})
+
+    return results
 
 
 def get_active_fleet_ids():
