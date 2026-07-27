@@ -34,6 +34,17 @@ resource "aws_iam_role_policy" "lambda_ssm_policy" {
         Resource = "*"
       },
 
+      # Allow Lambda to manage EC2 Instances
+      {
+        Effect = "Allow",
+        Action = [
+          "ec2:StartInstances",
+          "ec2:StopInstances",
+          "ec2:DescribeInstances"
+        ],
+        Resource = "*"
+      },
+
       # Allow CloudWatch logging for this Lambda
       {
         Effect = "Allow",

@@ -1,4 +1,5 @@
 import boto3
+import os
 import time
 import datetime
 
@@ -19,6 +20,7 @@ def lambda_handler(event, context):
     print("======================================")
 
     action = event.get("action")
+    env_tag = os.environ.get("ENV_TAG", "qa")
 
     if action not in ("stop", "start"):
         print(f"ERROR: Unknown action '{action}', expected 'start' or 'stop'")
@@ -26,11 +28,35 @@ def lambda_handler(event, context):
 
     target_capacity = 1 if action == "start" else 0
 
+    fleet_results = []
+    instance_results = []
+
+    # --- EC2 Fleet scheduling ---
+    try:
+        fleet_results = handle_fleet(action, target_capacity, context)
+    except Exception as e:
+        print(f"ERROR: Fleet scheduling failed unexpectedly: {e}")
+        fleet_results = [{"status": "error", "error": str(e)}]
+
+    # --- EC2 Instance scheduling (independent of fleet) ---
+    try:
+        instance_results = handle_ec2_instances(action, env_tag)
+    except Exception as e:
+        print(f"ERROR: EC2 instance scheduling failed unexpectedly: {e}")
+        instance_results = [{"status": "error", "error": str(e)}]
+
+    # --- Combined summary ---
+    all_results = {"fleet": fleet_results, "instances": instance_results}
+    print(f"Final Results: {all_results}")
+    return all_results
+
+
+def handle_fleet(action, target_capacity, context):
     try:
         fleet_ids = get_active_fleet_ids()
     except Exception as e:
         print(f"ERROR: Failed to discover fleets: {e}")
-        return {"error": str(e), "status": "failed"}
+        return [{"status": "error", "error": str(e)}]
 
     if not fleet_ids:
         print("No active fleets found")
@@ -62,9 +88,47 @@ def lambda_handler(event, context):
     succeeded = sum(1 for r in results if r["status"] == "success")
     skipped = sum(1 for r in results if r["status"] in ("skipped", "already_stopped", "already_running"))
     failed = sum(1 for r in results if r["status"] in ("error", "timeout"))
-    print(f"Summary: {succeeded} succeeded, {skipped} skipped, {failed} failed")
-    print(f"Results: {results}")
+    print(f"Fleet Summary: {succeeded} succeeded, {skipped} skipped, {failed} failed")
     return results
+
+
+def handle_ec2_instances(action, env_tag):
+    if action == "stop":
+        state_filter = ["running"]
+    else:
+        state_filter = ["stopped"]
+
+    response = ec2.describe_instances(
+        Filters=[
+            {"Name": "tag:environment", "Values": [env_tag]},
+            {"Name": "instance-state-name", "Values": state_filter}
+        ]
+    )
+
+    instance_ids = [
+        i["InstanceId"]
+        for r in response["Reservations"]
+        for i in r["Instances"]
+    ]
+
+    if not instance_ids:
+        print(f"No EC2 instances found for action '{action}' in environment '{env_tag}'")
+        return []
+
+    print(f"Found {len(instance_ids)} EC2 instance(s): {instance_ids}")
+
+    try:
+        if action == "stop":
+            ec2.stop_instances(InstanceIds=instance_ids)
+            print(f"Stopping EC2 instances: {instance_ids}")
+        else:
+            ec2.start_instances(InstanceIds=instance_ids)
+            print(f"Starting EC2 instances: {instance_ids}")
+
+        return [{"instance_ids": instance_ids, "status": "success", "action": action}]
+    except Exception as e:
+        print(f"ERROR: Failed to {action} EC2 instances: {e}")
+        return [{"instance_ids": instance_ids, "status": "error", "error": str(e)}]
 
 
 def get_active_fleet_ids():

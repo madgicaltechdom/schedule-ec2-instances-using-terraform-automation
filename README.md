@@ -1,8 +1,8 @@
-# Automated EC2 Fleet Scheduler using Terraform
+# Automated EC2 Fleet & Instance Scheduler using Terraform
 
 Many businesses struggle with unnecessary AWS costs due to idle EC2 instances running outside business hours.
 
-This solution uses Terraform + EventBridge + Lambda to automatically start and stop **EC2 Fleet instances** based on schedule — fully automated.
+This solution uses Terraform + EventBridge + Lambda to automatically start and stop **EC2 Fleet instances** and **individual EC2 instances** based on schedule — fully automated.
 
 Non-production machines can be turned off after hours and on weekends, and automatically started when working hours begin. This can significantly reduce EC2 costs in non-production environments by stopping idle resources outside business hours.
 
@@ -12,19 +12,16 @@ The automation works as follows:
 
 1. EventBridge (CloudWatch Scheduler) triggers on a cron schedule.
 2. EventBridge invokes a Lambda function.
-3. Lambda:
-    - Auto-discovers all active EC2 Fleets via `DescribeFleets` API (no hardcoded IDs)
-    - Checks current capacity of each fleet before modifying
-    - Calls `ec2:ModifyFleet` to set target capacity:
-        - `target_capacity = 0` → terminates fleet instances (10 PM IST)
-        - `target_capacity = 1` → creates new fleet instances (9 AM IST)
+3. Lambda handles two independent sections (failure in one does not affect the other):
+    - **EC2 Fleets**: Auto-discovers all active fleets via `DescribeFleets` API, checks capacity, calls `ec2:ModifyFleet` to set target capacity to 0 or 1
+    - **EC2 Instances**: Discovers instances by `environment` tag, calls `ec2:StartInstances` / `ec2:StopInstances`
 
 ## How It Works
 
 | Time (IST) | Time (UTC) | Action | What Happens |
 |------------|------------|--------|--------------|
-| 9 AM | 03:30 | Start | Fleet creates new Spot instances |
-| 8 PM | 14:30 | Stop | Fleet terminates Spot instances |
+| 9 AM | 03:30 | Start | Fleet creates new Spot instances + EC2 instances start |
+| 8 PM | 14:30 | Stop | Fleet terminates Spot instances + EC2 instances stop |
 | Sunday | - | - | Stays stopped (no start) |
 
 **Note:** Fleet instances are terminated and recreated each day. This means:
@@ -48,7 +45,7 @@ The Lambda checks current capacity before modifying:
 
 - Install Terraform
 - Setup your AWS account
-- Create a programmatic user with permissions to manage EC2 Fleets
+- Create a programmatic user with permissions to manage EC2 Fleets and EC2 Instances
 - Configure AWS credentials using:
   ```
   aws configure
@@ -102,9 +99,12 @@ The Lambda checks current capacity before modifying:
 The Lambda:
 
 - **Auto-discovers fleets** via `DescribeFleets` API — no hardcoded fleet IDs
+- **Auto-discovers EC2 instances** by `environment` tag — no hardcoded instance IDs
 - **Checks current capacity** before modifying (idempotent)
 - Receives action (`start` or `stop`) from EventBridge
 - Calls `ec2:ModifyFleet` to set target capacity to 0 or 1
+- Calls `ec2:StartInstances` / `ec2:StopInstances` for individual instances
+- **Error isolation**: Fleet and instance operations are independent — if one fails, the other still runs
 - Retries up to 3 times with exponential backoff (10s, 20s, 40s)
 - Skips retries for `FleetNotInModifiableState` errors
 
@@ -113,11 +113,12 @@ The Lambda:
 | Error | Handling |
 |-------|----------|
 | Unknown action | Returns error, Lambda succeeds |
-| `DescribeFleets` fails (IAM/network) | Returns error, Lambda succeeds |
+| `DescribeFleets` fails (IAM/network) | Returns error for fleet section, instances still run |
 | Fleet deleted during execution | Logs error, continues with next fleet |
 | `FleetNotInModifiableState` | Skips immediately, no retries |
 | Lambda timeout approaching | Stops retries, returns timeout status |
 | All retries exhausted | Returns error status |
+| EC2 instance start/stop fails | Returns error for instance section, fleet still runs |
 
 ### Log Output Example
 
@@ -130,7 +131,10 @@ Modifying fleet fleet-aaa from 1 to 0
 Set fleet fleet-aaa target capacity to 0
 Fleet fleet-bbb current capacity: 1
 Fleet fleet-bbb is already_stopped, skipping
-Summary: 1 succeeded, 1 skipped, 0 failed
+Fleet Summary: 1 succeeded, 1 skipped, 0 failed
+Found 3 EC2 instance(s): [i-aaa, i-bbb, i-ccc]
+Stopping EC2 instances: ['i-aaa', 'i-bbb', 'i-ccc']
+Final Results: {'fleet': [...], 'instances': [...]}
 ```
 
 ## IAM Permissions
@@ -140,6 +144,9 @@ Lambda Role Permissions:
 - `ec2:ModifyFleet`
 - `ec2:DescribeFleets`
 - `ec2:DescribeFleetInstances`
+- `ec2:StartInstances`
+- `ec2:StopInstances`
+- `ec2:DescribeInstances`
 - CloudWatch Logs permissions
 
 ## Verification
@@ -164,7 +171,9 @@ Found 1 fleet(s): [fleet-xxxxxxxxxxxxx]
 Fleet fleet-xxxxxxxxxxxxx current capacity: 1
 Modifying fleet fleet-xxxxxxxxxxxxx from 1 to 0
 Set fleet fleet-xxxxxxxxxxxxx target capacity to 0
-Summary: 1 succeeded, 0 skipped, 0 failed
+Fleet Summary: 1 succeeded, 0 skipped, 0 failed
+Found 2 EC2 instance(s): [i-xxxxxxxxxxxxx, i-yyyyyyyyyyyyy]
+Stopping EC2 instances: ['i-xxxxxxxxxxxxx', 'i-yyyyyyyyyyyyy']
 ```
 
 ## Time Zone Reference
