@@ -24,7 +24,7 @@ The automation works as follows:
 | Time (IST) | Time (UTC) | Action | What Happens |
 |------------|------------|--------|--------------|
 | 9 AM | 03:30 | Start | Fleet creates new Spot instances |
-| 10 PM | 16:30 | Stop | Fleet terminates Spot instances |
+| 8 PM | 14:30 | Stop | Fleet terminates Spot instances |
 | Sunday | - | - | Stays stopped (no start) |
 
 **Note:** Fleet instances are terminated and recreated each day. This means:
@@ -172,7 +172,7 @@ Summary: 1 succeeded, 0 skipped, 0 failed
 | IST | UTC |
 |-----|-----|
 | 9 AM | 03:30 |
-| 10 PM | 16:30 |
+| 8 PM | 14:30 |
 
 [Time Zone Converter (IST to UTC)](https://www.worldtimebuddy.com/ist-to-utc-converter)
 

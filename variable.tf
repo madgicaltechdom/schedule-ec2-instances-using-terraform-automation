@@ -7,8 +7,8 @@ variable "workspace_to_environment_map" {
 }
 
 variable "cron_stop" {
-  description = "Cron expression to stop fleet at 10 PM IST (16:30 UTC), Mon-SAT. Sunday stays stopped."
-  default     = "30 16 ? * MON-SAT *"
+  description = "Cron expression to stop fleet at 8 PM IST (14:30 UTC), Mon-SAT. Sunday stays stopped."
+  default     = "30 14 ? * MON-SAT *"
 }
 
 variable "cron_start" {
