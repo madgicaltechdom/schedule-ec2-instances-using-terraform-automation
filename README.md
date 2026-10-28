@@ -6,6 +6,24 @@ This solution uses Terraform + EventBridge + Lambda to automatically start and s
 
 Non-production machines can be turned off after hours and on weekends, and automatically started when working hours begin. This can significantly reduce EC2 costs in non-production environments by stopping idle resources outside business hours.
 
+## Ventech Deployment
+
+This branch (`ec2-fleet-and-instance-scheduler-ventech`) is deployed to the **Ventech AWS account** and schedules the **SonarQube** server.
+
+| Item | Value |
+|------|-------|
+| AWS profile | `ventech` |
+| Region | `us-west-1` (N. California) |
+| Terraform state | `s3://madgical-terraform-state-bucket-ventech/ncalifornia-scheduler/terraform.tfstate` (`ap-south-1`) |
+| Environment | `qa` (default workspace) |
+| Lambda | `EC2-Scheduler-qa` |
+| EventBridge rules | `EC2-Scheduler-Start-qa`, `EC2-Scheduler-Stop-qa` |
+| Dead-letter queue | `EC2-Scheduler-DLQ-qa` |
+
+SonarQube runs as a single Spot instance in an EC2 Fleet (capacity 1), launched from a launch template. Every night the fleet is scaled to 0 and the instance is terminated; every morning it is scaled back to 1 and a new instance is launched. SonarQube data survives because it lives on a separate persistent EBS volume that the launch template's user data reattaches and mounts at `/var/lib/docker` on boot. Expect SonarQube to be reachable a few minutes after 9 AM IST.
+
+SonarQube runs Mon–Sat, 9 AM–8 PM IST (66 of 168 hours a week).
+
 ## Architecture
 
 The automation works as follows:
@@ -15,6 +33,7 @@ The automation works as follows:
 3. Lambda handles two independent sections (failure in one does not affect the other):
     - **EC2 Fleets**: Auto-discovers all active fleets via `DescribeFleets` API, checks capacity, calls `ec2:ModifyFleet` to set target capacity to 0 or 1
     - **EC2 Instances**: Discovers instances by `environment` tag, **excludes fleet-managed instances** (tagged with `aws:ec2:fleet-id`), then stops/starts remaining instances individually
+4. If an invocation fails, EventBridge retries it up to 2 times (for events up to 1 hour old), then sends it to an SQS dead-letter queue (14-day retention).
 
 ## How It Works
 
@@ -39,34 +58,33 @@ The Lambda checks current capacity before modifying:
 | Fleet already at target capacity | Skips with log `already_running` or `already_stopped` |
 | Fleet not at target capacity | Modifies fleet to desired capacity |
 | Fleet in non-modifiable state | Skips immediately (e.g., `FleetNotInModifiableState`) |
-| Fleet discovery fails | Returns error, continues with remaining fleets |
+| Fleet capacity lookup fails | Logs error, continues with remaining fleets |
 
 ## Requirements
 
-- Install Terraform
-- Setup your AWS account
-- Create a programmatic user with permissions to manage EC2 Fleets and EC2 Instances
-- Configure AWS credentials using:
+- Terraform >= 1.10 (the S3 backend uses native state locking via `use_lockfile`)
+- An AWS user with permissions to manage EC2 Fleets, EC2 Instances, Lambda, EventBridge, SQS and IAM
+- An AWS CLI profile named `ventech` (used by both the provider and the S3 backend):
   ```
-  aws configure
+  aws configure --profile ventech
   ```
 
 ## Usage
 
 1. Clone this repository:
    ```
-   git clone -b feature/ec2-scheduler-automation https://github.com/madgicaltechdom/schedule-ec2-instances-using-terraform-automation.git
+   git clone -b ec2-fleet-and-instance-scheduler-ventech https://github.com/madgicaltechdom/schedule-ec2-instances-using-terraform-automation.git
    ```
 
-2. Navigate to the nCalifornia directory:
+2. Navigate to the repository root (all Terraform files are at the root):
    ```
-   cd schedule-ec2-instances-using-terraform-automation/nCalifornia
+   cd schedule-ec2-instances-using-terraform-automation
    ```
 
-3. (Optional) Customize cron schedules in `variable.tf`:
+3. (Optional) Customize cron schedules in `variable.tf` (cron times are in UTC):
    ```
    variable "cron_stop" {
-     default = "30 16 ? * MON-SAT *"  # 10 PM IST, Mon-SAT
+     default = "30 14 ? * MON-SAT *"  # 8 PM IST, Mon-SAT
    }
 
    variable "cron_start" {
@@ -74,9 +92,17 @@ The Lambda checks current capacity before modifying:
    }
    ```
 
-4. Create a new workspace (optional):
+4. (Optional) Select a workspace. The workspace decides the `environment` tag value the Lambda targets and the resource name suffix:
+
+   | Workspace | Environment tag |
+   |-----------|-----------------|
+   | `default` | `qa` |
+   | `qa` | `qa` |
+   | `prd` | `prd` |
+   | any other | `qa` |
+
    ```
-   terraform workspace new qa
+   terraform workspace new prd
    ```
 
 5. Initialize Terraform:
@@ -94,6 +120,15 @@ The Lambda checks current capacity before modifying:
    terraform apply
    ```
 
+### Updating the Lambda Code
+
+Terraform deploys `lambda.zip`, not `lambda_function.py`. After editing the Python file, rebuild the zip before applying:
+
+```
+zip lambda.zip lambda_function.py
+terraform apply
+```
+
 ## Lambda Implementation
 
 The Lambda:
@@ -107,7 +142,7 @@ The Lambda:
 - Calls `ec2:ModifyFleet` to set target capacity to 0 or 1
 - Calls `ec2:StartInstances` / `ec2:StopInstances` for individual instances
 - **Error isolation**: Fleet and instance operations are independent — if one fails, the other still runs
-- Retries up to 3 times with exponential backoff (10s, 20s, 40s)
+- Makes up to 3 attempts per fleet with exponential backoff (waits 10s, then 20s)
 - Skips retries for `FleetNotInModifiableState` errors
 
 ### Error Handling
@@ -151,6 +186,7 @@ Lambda Role Permissions:
 - `ec2:StartInstances`
 - `ec2:StopInstances`
 - `ec2:DescribeInstances`
+- `sqs:SendMessage` (dead-letter queue only)
 - CloudWatch Logs permissions
 
 ## Verification
@@ -180,6 +216,24 @@ Skipping 1 fleet-managed instance(s) (handled by fleet): [i-yyyyyyyyyyyyy]
 Found 1 EC2 instance(s) to stop: [i-xxxxxxxxxxxxx]
 Stopping EC2 instance: i-xxxxxxxxxxxxx
 ```
+
+### Check the Dead-Letter Queue
+
+Events that failed after all EventBridge retries land in the DLQ. It should normally be empty:
+
+```
+aws sqs get-queue-attributes --profile ventech --region us-west-1 \
+  --queue-url $(terraform output -raw dlq_url) \
+  --attribute-names ApproximateNumberOfMessages
+```
+
+## Known Limitations
+
+- **Fleets are not filtered by tag**: every active EC2 Fleet in the region is scaled to 0/1, not only fleets tagged with the environment.
+- **Start always sets capacity to 1**: a fleet's original capacity is not remembered. Fleets that need more than 1 instance will come back with 1.
+- **Public IP changes daily**: fleet instances are new each morning and there is no Elastic IP or DNS update, so anything that points at the SonarQube IP must be updated (or an Elastic IP added to the launch template user data).
+- **Only `/var/lib/docker` persists**: the root volume is deleted on termination, so anything stored outside the persistent EBS volume is lost each night.
+- **Spot capacity**: if no Spot capacity is available at 9 AM for the fleet's instance types, startup is delayed until capacity frees up.
 
 ## Time Zone Reference
 
